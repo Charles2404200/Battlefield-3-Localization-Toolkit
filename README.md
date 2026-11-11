@@ -2,7 +2,7 @@
 
 Tools for exporting, translating, rebuilding, and installing Vietnamese text and fonts for the **32-bit Steam release of Battlefield 3**. The main application is a C# Windows Forms GUI. Text and font preparation tools are written in C#; the in-game font hook is a C++ x86 `dinput8.dll` proxy.
 
-The current workflow has been tested on one Steam installation. The game has displayed **“CHIẾN DỊCH”** correctly with translated text and the replacement font. File offsets and payload sizes are specific to that game build; other releases have not been verified.
+The current workflow has been tested on one Steam installation. The game has displayed **“CHIẾN DỊCH”** correctly with translated text and the replacement font; Vietnamese subtitles were also confirmed in Night Shift with the fixed-size text rebuild. File offsets and payload sizes are specific to that game build; other releases have not been verified.
 
 ## What the toolkit does
 
@@ -43,9 +43,9 @@ The importer normalizes Vietnamese text to Unicode NFC. It accepts commas accide
 
 ## How installation works
 
-BF3 stores English localization in `Update/Patch/Data/Win32/Loc/en.sb`. The importer rewrites the text and character histogram while keeping the complete `.sb` file the same length. It maps 134 Vietnamese characters outside ASCII to game bytes and writes the matching `vietnamese_map.json` used by the font builder.
+BF3 stores English localization in `Update/Patch/Data/Win32/Loc/en.sb`. The importer rewrites the text and character histogram while keeping the complete `.sb` file the same length. It maps 134 Vietnamese characters outside ASCII to game bytes and writes the matching `vietnamese_map.json` used by the font builder. The 19 letters assigned to low control byte slots are selected by translation frequency, keeping commonly used subtitle letters in the high byte range.
 
-The localization text must fit the original **263,138-byte compressed TOC slot**. The importer first uses zlib, then bundled Zopfli compression if needed. If the original string order does not fit, it can group translated strings at the end and update the ID-to-offset table. It verifies each rebuilt ID and string before installation. If no supported layout fits, installation stops without changing game files.
+The localization text must fit the original **263,138-byte compressed TOC slot** and retain the original **599,272-byte decoded asset size**. The importer keeps the original 65,536-byte decoded block boundaries and combines complete zlib streams from .NET and bundled Zopfli to fill the compressed slot exactly. It does not count trailing padding as compressed data. When translated strings would grow beyond the decoded asset size, identical strings share a single stored copy while every ID keeps its own table record. The importer verifies every rebuilt ID and string. If either size limit cannot be met, installation stops without changing game files.
 
 The C++ x86 hook forwards DirectInput 8 exports to the system DLL. It intercepts matching `ReadFile` calls for three known CAS locations and replaces the returned bytes in memory with payloads from `Battlefield 3/fonts/`. The payloads must remain exactly **62,403**, **28,727**, and **28,845** bytes for the main UI, EULA, and store fonts respectively. The hook caches archive identity by handle, validates the target buffer, and handles completed overlapped reads. It loads font files when the game starts; restart BF3 after changing a payload. The current hook does **not** write a runtime log; an old `fonts/hook_native.log` may remain from previous builds.
 

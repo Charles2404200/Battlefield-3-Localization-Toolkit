@@ -230,7 +230,8 @@ public static partial class Program
         return (decoded.ToArray(), blocks, HashHex(prefixHasher.GetHashAndReset()));
     }
 
-    private static (List<ChunkEntry> Entries, ChunkHeader Header) ParseChunk(byte[] chunk)
+    private static (List<ChunkEntry> Entries, ChunkHeader Header) ParseChunk(byte[] chunk,
+        bool allowSharedOffsets = false)
     {
         if (chunk.Length < 36) throw new InvalidDataException("Localization chunk is too short");
         uint Read32(int offset) => BinaryPrimitives.ReadUInt32LittleEndian(chunk.AsSpan(offset, 4));
@@ -261,7 +262,7 @@ public static partial class Program
             var absoluteOffset = textBase + relativeOffset;
             if (hash <= previousHash)
                 throw new InvalidDataException($"Hash order is invalid at entry {index}");
-            if (!seenOffsets.Add(relativeOffset))
+            if (!seenOffsets.Add(relativeOffset) && !allowSharedOffsets)
                 throw new InvalidDataException($"Duplicate text offset at entry {index}");
             if (absoluteOffset >= chunk.Length)
                 throw new InvalidDataException($"Text offset outside chunk at entry {index}");

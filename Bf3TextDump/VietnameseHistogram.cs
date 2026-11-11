@@ -21,7 +21,8 @@ public static partial class Program
         IReadOnlyDictionary<byte, ushort> PreservedBytes);
 
     private static VietnameseMap BuildVietnameseMap(string baselineSb, IReadOnlyList<TocChunk> chunks,
-        byte[] originalText, IReadOnlyList<ChunkEntry> entries)
+        byte[] originalText, IReadOnlyList<ChunkEntry> entries,
+        IReadOnlyDictionary<uint, string> translations)
     {
         if (chunks.Count != 5 || chunks[2].GuidBytes != HistogramGuid)
             throw new InvalidDataException("Expected BF3 English histogram as TOC chunk 2");
@@ -61,10 +62,16 @@ public static partial class Program
 
         var freeHigh = Enumerable.Range(0x81, 0x7F).Select(value => (byte)value)
             .Where(value => !usedHigh.Contains(value)).ToArray();
+        var frequency = new Dictionary<ushort, int>();
+        foreach (var translation in translations.Values)
+            foreach (var character in translation.Normalize(NormalizationForm.FormC))
+                if (alphabet.Contains(character))
+                    frequency[(ushort)character] = frequency.GetValueOrDefault(character) + 1;
         var remaining = alphabet.Where(code => !characterBytes.ContainsKey((char)code))
-            .OrderBy(code => code).ToArray();
+            .OrderBy(code => frequency.GetValueOrDefault(code)).ThenBy(code => code).ToArray();
         var lowNeeded = remaining.Length - freeHigh.Length;
-        // These avoid TAB, LF and CR. The first eight have been checked in the BF3 menu.
+        // Some render paths may interpret low bytes as controls. Give these slots
+        // to the least-used letters; common subtitle letters stay in high slots.
         ushort[] lowSlots = [1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24];
         if (lowNeeded != lowSlots.Length)
             throw new InvalidDataException($"This English build needs {lowNeeded} low glyph slots; expected {lowSlots.Length}");
@@ -76,7 +83,7 @@ public static partial class Program
             characterBytes.Add((char)code, checked((byte)lowSlots[i]));
             lowGlyphRemap.Add(code, lowSlots[i]);
         }
-        var highCharacters = remaining.Skip(lowNeeded).ToArray();
+        var highCharacters = remaining.Skip(lowNeeded).OrderBy(code => code).ToArray();
         if (highCharacters.Length != freeHigh.Length)
             throw new InvalidDataException("High-byte mapping length mismatch");
         for (var i = 0; i < freeHigh.Length; i++)

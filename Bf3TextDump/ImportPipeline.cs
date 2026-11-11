@@ -49,6 +49,8 @@ public static partial class Program
             tocChunks[0].GuidBytes != UsLocGuidBytes ||
             tocChunks[0].Offset != 0 || tocChunks[0].Size != originalPrefixLength)
             throw new InvalidDataException("Patch TOC does not match the expected us_loc chunk at file offset 0");
+        if (blocks.Count < 2 || blocks.Take(blocks.Count - 1).Any(block => block.unpacked_size != 65536))
+            throw new InvalidDataException("Original us_loc block layout is not the expected 64 KiB layout");
         var sourceLength = new FileInfo(baselineSb).Length;
         ulong nextOffset = 0;
         foreach (var item in tocChunks)
@@ -60,7 +62,7 @@ public static partial class Program
         if (nextOffset != (ulong)sourceLength)
             throw new InvalidDataException("Patch TOC chunk sizes do not cover en.sb exactly");
         var vietnameseMap = options.MapVietnamese
-            ? BuildVietnameseMap(baselineSb, tocChunks, originalChunk, entries) : null;
+            ? BuildVietnameseMap(baselineSb, tocChunks, originalChunk, entries, translations) : null;
         Dictionary<char, byte>? translationBytes = null;
         if (vietnameseMap is not null)
         {
@@ -85,26 +87,24 @@ public static partial class Program
         EncodedPrefix encoded;
         try
         {
-            encoded = EncodeToOriginalLength(modifiedChunk, originalPrefixLength, quickZopfli: true);
+            if (modifiedChunk.Length > originalChunk.Length)
+                throw new PackedSlotOverflowException($"Decoded text grew from " +
+                    $"{originalChunk.Length:N0} to {modifiedChunk.Length:N0} bytes; " +
+                    "trying shared strings to keep the original asset size.");
+            encoded = EncodeToOriginalLength(modifiedChunk, originalPrefixLength, blocks.Count);
         }
-        catch (PackedSlotOverflowException)
+        catch (PackedSlotOverflowException ex)
         {
-            Console.WriteLine("Original text order did not fit; grouping translated strings at the end.");
-            var compactChunk = RebuildChunk(originalChunk, entries, header, translations,
-                out var compactChanges, translationBytes, translatedLast: true);
-            VerifyRebuiltContent(originalChunk, compactChunk, entries, translations, translationBytes);
-            try
-            {
-                encoded = EncodeToOriginalLength(compactChunk, originalPrefixLength);
-                modifiedChunk = compactChunk;
-                changes = compactChanges;
-                textLayout = "translated-last";
-            }
-            catch (PackedSlotOverflowException)
-            {
-                Console.WriteLine("Grouped text did not fit; retrying all block sizes with original order.");
-                encoded = EncodeToOriginalLength(modifiedChunk, originalPrefixLength);
-            }
+            Console.WriteLine(ex.Message);
+            Console.WriteLine("Original text order did not fit; sharing identical strings at the original decoded size.");
+            var sharedChunk = RebuildChunk(originalChunk, entries, header, translations,
+                out var sharedChanges, translationBytes, deduplicate: true,
+                padToLength: originalChunk.Length);
+            VerifyRebuiltContent(originalChunk, sharedChunk, entries, translations, translationBytes);
+            encoded = EncodeToOriginalLength(sharedChunk, originalPrefixLength, blocks.Count);
+            modifiedChunk = sharedChunk;
+            changes = sharedChanges;
+            textLayout = "original-order-shared-strings";
         }
         File.WriteAllBytes(Path.Combine(stageDir, "modified_chunk.bin"), modifiedChunk);
         var stageSb = Path.Combine(stageDir, "en.sb");
@@ -175,7 +175,8 @@ public static partial class Program
 
     private static byte[] RebuildChunk(byte[] original, List<ChunkEntry> hashEntries,
         ChunkHeader header, IReadOnlyDictionary<uint, string> translations, out List<TextChange> changes,
-        IReadOnlyDictionary<char, byte>? vietnameseBytes = null, bool translatedLast = false)
+        IReadOnlyDictionary<char, byte>? vietnameseBytes = null, bool deduplicate = false,
+        int? padToLength = null)
     {
         var textBase = header.text_base;
         var prefix = original.AsSpan(0, textBase).ToArray();
@@ -192,27 +193,46 @@ public static partial class Program
         using var output = new MemoryStream(original.Length + 1024);
         output.Write(prefix);
         changes = [];
-        var outputOrder = translatedLast
-            ? physicalOrder.OrderBy(entry => translations.ContainsKey(entry.Hash) ? 1 : 0)
-            : physicalOrder.AsEnumerable();
-        foreach (var entry in outputOrder)
+        var sharedOffsets = deduplicate ? new Dictionary<string, int>() : null;
+        foreach (var entry in physicalOrder)
         {
-            var newOffset = checked((int)output.Position - textBase);
             var raw = original.AsSpan(entry.AbsoluteOffset, entry.RawLength).ToArray();
             var replacement = translations.TryGetValue(entry.Hash, out var vietnamese)
                 ? EncodeTranslation(vietnamese!, vietnameseBytes) : raw;
+            var newOffset = checked((int)output.Position - textBase);
+            var writeString = true;
+            if (sharedOffsets is not null)
+            {
+                var key = Convert.ToBase64String(replacement);
+                if (sharedOffsets.TryGetValue(key, out var existing))
+                {
+                    newOffset = existing;
+                    writeString = false;
+                }
+                else sharedOffsets.Add(key, newOffset);
+            }
             if (!replacement.AsSpan().SequenceEqual(raw))
                 changes.Add(new TextChange($"0x{entry.Hash:X8}", (int)entry.RelativeOffset,
                     newOffset, raw.Length, replacement.Length, vietnamese!));
             var offsetAt = checked((int)header.table_offset + 8 * (recordIndex[entry.Hash] + 1) + 4);
             BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(offsetAt, 4), (uint)newOffset);
-            output.Write(replacement);
-            output.WriteByte(0);
+            if (writeString)
+            {
+                output.Write(replacement);
+                output.WriteByte(0);
+            }
         }
         var tail = original.AsSpan(textBase + expectedOldOffset);
         if (tail.Length > 3 || tail.IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException($"String region has {tail.Length} non-padding trailing bytes");
         output.Write(tail);
+        if (padToLength.HasValue)
+        {
+            if (output.Length > padToLength.Value)
+                throw new PackedSlotOverflowException($"Shared strings need {output.Length:N0} " +
+                    $"decoded bytes but the original asset declares {padToLength.Value:N0}.");
+            output.SetLength(padToLength.Value);
+        }
         var result = output.ToArray();
         prefix.CopyTo(result, 0);
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4, 4), checked((uint)(result.Length - 8)));
@@ -223,7 +243,7 @@ public static partial class Program
         IReadOnlyList<ChunkEntry> oldEntries, IReadOnlyDictionary<uint, string> translations,
         IReadOnlyDictionary<char, byte>? vietnameseBytes)
     {
-        var (newEntries, _) = ParseChunk(rebuilt);
+        var (newEntries, _) = ParseChunk(rebuilt, allowSharedOffsets: true);
         if (newEntries.Count != oldEntries.Count)
             throw new InvalidDataException("Rebuilt chunk lost text IDs");
         var byHash = newEntries.ToDictionary(entry => entry.Hash);
@@ -289,91 +309,104 @@ public static partial class Program
         return [.. result];
     }
 
+    private sealed record PackedChoice(string Name, byte[] Bytes);
+
     private static EncodedPrefix EncodeToOriginalLength(byte[] chunk, int originalLength,
-        bool quickZopfli = false)
+        int expectedBlockCount)
     {
-        var candidates = new List<(byte[] Bytes, CompressionLevel Level, int BlockSize, int LastHeader, int LastPacked)>();
-        var blockSizes = new[] { 65536, 65520, 65504, 65472, 65408, 65280, 65024,
-            64512, 64000, 63000, 62000, 60000, 57344, 49152, 32768 };
-        Span<byte> blockHeader = stackalloc byte[8];
-        foreach (var blockSize in blockSizes)
+        const int blockSize = 65536;
+        var blockCount = (chunk.Length + blockSize - 1) / blockSize;
+        if (blockCount != expectedBlockCount)
+            throw new PackedSlotOverflowException($"Translated text needs {blockCount} blocks, " +
+                $"but this BF3 bundle has {expectedBlockCount}. No game file was changed.");
+
+        // BF3's original us_loc asset uses full 64 KiB decoded blocks until the
+        // last block. Keep those boundaries and fill the signed slot entirely
+        // with complete zlib streams; never count zero padding as zlib input.
+        var choices = new List<List<PackedChoice>>(blockCount);
+        for (var start = 0; start < chunk.Length; start += blockSize)
         {
-            var level = CompressionLevel.SmallestSize;
-            using var output = new MemoryStream();
-            var lastHeader = 0;
-            var lastPacked = 0;
-            for (var start = 0; start < chunk.Length; start += blockSize)
+            var length = Math.Min(blockSize, chunk.Length - start);
+            var source = chunk.AsSpan(start, length);
+            var blockChoices = new List<PackedChoice>();
+            foreach (var level in new[] { CompressionLevel.SmallestSize,
+                         CompressionLevel.Optimal, CompressionLevel.Fastest })
             {
-                var length = Math.Min(blockSize, chunk.Length - start);
                 using var packedStream = new MemoryStream();
-                using (var zlib = new ZLibStream(packedStream, level, leaveOpen: true))
-                    zlib.Write(chunk, start, length);
-                var packed = packedStream.ToArray();
-                lastHeader = (int)output.Position;
-                lastPacked = packed.Length;
-                BinaryPrimitives.WriteUInt32BigEndian(blockHeader[..4], (uint)length);
-                BinaryPrimitives.WriteUInt32BigEndian(blockHeader[4..], (uint)packed.Length);
-                output.Write(blockHeader);
-                output.Write(packed);
+                using (var zlib = new ZLibStream(packedStream, level,
+                           leaveOpen: true))
+                    zlib.Write(source);
+                var bytes = packedStream.ToArray();
+                if (bytes.Length >= 6 && bytes[0] == 0x78 &&
+                    bytes[1] is 0xDA or 0x9C or 0x01)
+                    bytes[1] = 0xDA; // FLEVEL is advisory; keep BF3's original zlib header.
+                blockChoices.Add(new PackedChoice($"zlib-{level}", bytes));
             }
-            candidates.Add((output.ToArray(), level, blockSize, lastHeader, lastPacked));
+            foreach (var iterations in new[] { 1, 2, 3, 4, 5, 6, 7, 8, 10, 15 })
+                blockChoices.Add(new PackedChoice($"Zopfli-i{iterations}",
+                    ZopfliCompressor.CompressBlock(source, iterations)));
+            choices.Add(blockChoices.Where(item => item.Bytes.Length <= blockSize &&
+                    item.Bytes.Length >= 6 && item.Bytes[0] == 0x78 && item.Bytes[1] == 0xDA)
+                .DistinctBy(item => item.Bytes.Length).OrderBy(item => item.Bytes.Length).ToList());
         }
-        var chosen = candidates.Where(candidate => candidate.Bytes.Length <= originalLength &&
-                candidate.LastPacked + originalLength - candidate.Bytes.Length <= 65536)
-            .OrderByDescending(candidate => candidate.Bytes.Length).FirstOrDefault();
-        if (chosen.Bytes is null)
+
+        var minimumLength = choices.Sum(block => 8 + block.Min(item => item.Bytes.Length));
+        if (minimumLength > originalLength)
+            throw new PackedSlotOverflowException($"The translated text needs at least " +
+                $"{minimumLength:N0} bytes with the original 64 KiB block layout, " +
+                $"but the signed TOC slot holds {originalLength:N0}. No game file was changed.");
+
+        var extraNeeded = originalLength - minimumLength;
+        var paths = new Dictionary<int, int[]> { [0] = [] };
+        foreach (var block in choices)
         {
-            Console.WriteLine($"Standard zlib needs at least {candidates.Min(item => item.Bytes.Length):N0} bytes; " +
-                $"trying stronger Zopfli compression for the {originalLength:N0}-byte TOC slot.");
-            return EncodeWithZopfli(chunk, originalLength, quickZopfli);
+            var next = new Dictionary<int, int[]>();
+            var smallest = block[0].Bytes.Length;
+            foreach (var (extraUsed, path) in paths)
+                for (var index = 0; index < block.Count; index++)
+                {
+                    var extra = extraUsed + block[index].Bytes.Length - smallest;
+                    if (extra > extraNeeded || next.ContainsKey(extra)) continue;
+                    next.Add(extra, [.. path, index]);
+                }
+            paths = next;
         }
-        var padding = originalLength - chosen.Bytes.Length;
-        var padded = new byte[originalLength];
-        chosen.Bytes.CopyTo(padded, 0);
-        BinaryPrimitives.WriteUInt32BigEndian(padded.AsSpan(chosen.LastHeader + 4, 4),
-            (uint)(chosen.LastPacked + padding));
-        return new EncodedPrefix(padded, "zlib SmallestSize", chosen.BlockSize, padding);
+        if (!paths.TryGetValue(extraNeeded, out var selected))
+            throw new PackedSlotOverflowException($"No exact {originalLength:N0}-byte encoding " +
+                $"uses complete zlib streams and the original block layout. " +
+                $"Closest candidate is {minimumLength + paths.Keys.Max():N0} bytes. " +
+                "No game file was changed.");
+
+        using var output = new MemoryStream(originalLength);
+        Span<byte> header = stackalloc byte[8];
+        for (var index = 0; index < selected.Length; index++)
+        {
+            var decodedSize = Math.Min(blockSize, chunk.Length - index * blockSize);
+            var packed = choices[index][selected[index]];
+            var adler = BinaryPrimitives.ReadUInt32BigEndian(packed.Bytes.AsSpan(packed.Bytes.Length - 4));
+            if (adler != Adler32(chunk.AsSpan(index * blockSize, decodedSize)))
+                throw new InvalidDataException($"Block {index + 1} has an invalid final zlib checksum");
+            BinaryPrimitives.WriteUInt32BigEndian(header[..4], (uint)decodedSize);
+            BinaryPrimitives.WriteUInt32BigEndian(header[4..], (uint)packed.Bytes.Length);
+            output.Write(header);
+            output.Write(packed.Bytes);
+            Console.WriteLine($"Block {index + 1}/{selected.Length}: {packed.Name}, " +
+                $"decoded {decodedSize:N0}, packed {packed.Bytes.Length:N0}");
+        }
+        if (output.Length != originalLength)
+            throw new InvalidDataException("Exact block selection did not fill the TOC slot");
+        return new EncodedPrefix(output.ToArray(), "exact 64KiB mixed zlib/Zopfli", blockSize, 0);
     }
 
-    private static EncodedPrefix EncodeWithZopfli(byte[] chunk, int originalLength, bool quick)
+    private static uint Adler32(ReadOnlySpan<byte> bytes)
     {
-        var bestLength = int.MaxValue;
-        var candidates = quick
-            ? new[] { (63500, 15), (64000, 15), (59250, 5) }
-            : (from iterations in new[] { 5, 15 }
-               from blockSize in new[] { 64000, 63500, 59250, 59100, 59300, 58500,
-                   60500, 60000, 62000, 63000, 65536, 61500, 62500, 61000 }
-               select (blockSize, iterations)).ToArray();
-        foreach (var (blockSize, iterations) in candidates)
+        uint first = 1, second = 0;
+        foreach (var value in bytes)
         {
-            using var output = new MemoryStream();
-            var lastHeader = 0;
-            var lastPacked = 0;
-            Span<byte> blockHeader = stackalloc byte[8];
-            for (var start = 0; start < chunk.Length; start += blockSize)
-            {
-                var length = Math.Min(blockSize, chunk.Length - start);
-                var packed = ZopfliCompressor.CompressBlock(chunk.AsSpan(start, length), iterations);
-                lastHeader = checked((int)output.Position);
-                lastPacked = packed.Length;
-                BinaryPrimitives.WriteUInt32BigEndian(blockHeader[..4], (uint)length);
-                BinaryPrimitives.WriteUInt32BigEndian(blockHeader[4..], (uint)packed.Length);
-                output.Write(blockHeader);
-                output.Write(packed);
-            }
-            var encoded = output.ToArray();
-            bestLength = Math.Min(bestLength, encoded.Length);
-            var padding = originalLength - encoded.Length;
-            Console.WriteLine($"Zopfli i{iterations} block={blockSize}: {encoded.Length:N0}/{originalLength:N0} bytes");
-            if (padding < 0 || lastPacked + padding > 65536) continue;
-            var padded = new byte[originalLength];
-            encoded.CopyTo(padded, 0);
-            BinaryPrimitives.WriteUInt32BigEndian(padded.AsSpan(lastHeader + 4, 4),
-                checked((uint)(lastPacked + padding)));
-            return new EncodedPrefix(padded, $"Zopfli zlib i{iterations}", blockSize, padding);
+            first = (first + value) % 65521;
+            second = (second + first) % 65521;
         }
-        throw new PackedSlotOverflowException($"Even Zopfli needs {bestLength:N0} bytes for the translated text, " +
-            $"but the signed TOC slot holds {originalLength:N0}. No game file was changed.");
+        return (second << 16) | first;
     }
 
     private static List<TocChunk> ReadTocChunks(string path)
