@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Bf3TextDump\Bf3TextDump.csproj" />
+    <ProjectReference Include="..\Bf3FontDump\Bf3FontDump.csproj" />
+    <ProjectReference Include="..\Bf3FontSubset\Bf3FontSubset.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\Bf3FontHookNative\build-x86\Release\dinput8.dll"
+          Link="hook\dinput8.dll" CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true"
+          Condition="Exists('..\Bf3FontHookNative\build-x86\Release\dinput8.dll')" />
+    <None Include="..\Bf3TextDump\compressor\zopfli.exe"
+          Link="compressor\zopfli.exe" CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <None Include="..\Bf3TextDump\compressor\LICENSE.txt"
+          Link="compressor\LICENSE.txt" CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+</Project>

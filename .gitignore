@@ -1,0 +1,37 @@
+# Local builds, IDE state, and diagnostics
+build/
+Bf3FontHookNative/build-x86/
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.pdb
+*.log
+*.tmp
+*.bak
+
+# Extracted or staged Battlefield 3 assets
+dump/
+*.cas-payload
+*.gfx
+*.sb
+*.toc
+*.cat
+
+# Local research notes excluded from the public repository
+/font_import_diagnosis.md
+/offset_analysis.md
+/Bf3ByteRemapSheet/
+/Bf3FontHook/
+/Bf3FontHookHost/
+
+# The vendored MinHook sources are staged explicitly, without its own repo metadata
+Bf3FontHookNative/third_party/minhook/.git/
+Bf3FontHookNative/third_party/minhook/.github/
+Bf3FontHookNative/third_party/minhook/.editorconfig
+Bf3FontHookNative/third_party/minhook/.gitignore
+Bf3FontHookNative/third_party/minhook/AUTHORS.txt
+Bf3FontHookNative/third_party/minhook/README.md
+Bf3FontHookNative/third_party/minhook/dll_resources/

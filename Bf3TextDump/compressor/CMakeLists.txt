@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(Bf3Zopfli LANGUAGES C)
+file(GLOB ZOPFLI_SOURCES source/*.c)
+add_executable(zopfli ${ZOPFLI_SOURCES})
+if(MSVC)
+    target_compile_options(zopfli PRIVATE /O2)
+    target_compile_definitions(zopfli PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
