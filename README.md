@@ -41,6 +41,8 @@ The CSV has three logical columns:
 
 The importer normalizes Vietnamese text to Unicode NFC. It accepts commas accidentally left unquoted in the third column by joining the extra fields back into that translation; it does not rewrite the CSV. Standard CSV quoting is still recommended for spreadsheet compatibility, especially for commas, quotes, and newlines.
 
+Some English lines have multiple game IDs. If exactly one Vietnamese translation exists for identical original text, the importer applies it to the other IDs too. It leaves duplicates with conflicting translations alone. Rows with no translation and no unambiguous duplicate remain in English; CSV validation reports how many such rows remain.
+
 ## How installation works
 
 BF3 stores English localization in `Update/Patch/Data/Win32/Loc/en.sb`. The importer rewrites the text and character histogram while keeping the complete `.sb` file the same length. It maps 134 Vietnamese characters outside ASCII to game bytes and writes the matching `vietnamese_map.json` used by the font builder. The 19 letters assigned to low control byte slots are selected by translation frequency, keeping commonly used subtitle letters in the high byte range.
@@ -97,6 +99,7 @@ For CLI text import options, run `dotnet run --project Bf3TextDump -- --help`. T
 | Symptom | Check |
 | --- | --- |
 | CSV validation reports changed English sources | Restore the `english` column to the exported text; edit only `vietnamese`. |
+| A subtitle still appears in English | Check whether its CSV row has a translation. The same English sentence may have several IDs; the importer automatically fills only unambiguous duplicates. |
 | Font builder reports missing glyphs | Add the reported glyphs to the edited GFX files, then rebuild. Original BF3 GFX files do not contain the complete Vietnamese set. |
 | Text exceeds the signed TOC slot | Shorten some translations. The importer has already tried its supported compression and string layouts. No game file is installed on this failure. |
 | GUI reports an existing `dinput8.dll` | Check the existing mod. The installer will not overwrite an unrelated proxy DLL. |

@@ -45,15 +45,23 @@ public static partial class Program
                 if (checkedSheet.UnquotedTranslationCommaRows != 0)
                     Console.WriteLine($"Recovered commas in the Vietnamese column of " +
                         $"{checkedSheet.UnquotedTranslationCommaRows} rows; CSV file was not changed.");
+                var (resolvedTranslations, inheritedIds, ambiguousSources) =
+                    ExpandDuplicateSourceTranslations(entries, checkedSheet.Translations);
+                Console.WriteLine($"Inherited translations for {inheritedIds} IDs with identical English text; " +
+                    $"left {ambiguousSources} conflicting source groups untouched.");
+                Console.WriteLine($"{entries.Count(entry => entry.RawLength > 0) - resolvedTranslations.Count:N0} " +
+                    "nonempty IDs still have no translation and will remain English.");
                 ImportTranslations(options, referenceInput, chunk, blocks, entries, header,
-                    checkedSheet.Translations);
+                    resolvedTranslations);
                 return 0;
             }
             if (options.ValidateOnly)
             {
                 var checkedSheet = ValidateSheet(sheetPath, entries);
                 Console.WriteLine($"Valid translation sheet: {checkedSheet.Rows} known IDs, " +
-                    $"{checkedSheet.Translated} translated, {checkedSheet.Missing} missing, " +
+                    $"{checkedSheet.Translated} translated, " +
+                    $"{entries.Count(entry => entry.RawLength > 0) - checkedSheet.Translated} untranslated, " +
+                    $"{checkedSheet.Missing} missing rows, " +
                     $"{checkedSheet.SourceDifferences} source differences.");
                 if (checkedSheet.UnquotedTranslationCommaRows != 0)
                     Console.WriteLine($"Recovered commas in the Vietnamese column of " +
@@ -113,6 +121,31 @@ public static partial class Program
     }
 
     public static int Run(string[] args) => Main(args);
+
+    private static (IReadOnlyDictionary<uint, string> Translations, int InheritedIds,
+        int AmbiguousSources) ExpandDuplicateSourceTranslations(
+        IReadOnlyList<ChunkEntry> entries, IReadOnlyDictionary<uint, string> explicitTranslations)
+    {
+        var resolved = new Dictionary<uint, string>(explicitTranslations);
+        var inheritedIds = 0;
+        var ambiguousSources = 0;
+        foreach (var sourceGroup in entries.Where(entry => entry.RawLength > 0)
+                     .GroupBy(entry => entry.Source, StringComparer.Ordinal))
+        {
+            var choices = sourceGroup.Where(entry => explicitTranslations.ContainsKey(entry.Hash))
+                .Select(entry => explicitTranslations[entry.Hash])
+                .Distinct(StringComparer.Ordinal).Take(2).ToArray();
+            if (choices.Length > 1)
+            {
+                ambiguousSources++;
+                continue;
+            }
+            if (choices.Length == 0) continue;
+            foreach (var entry in sourceGroup)
+                if (resolved.TryAdd(entry.Hash, choices[0])) inheritedIds++;
+        }
+        return (resolved, inheritedIds, ambiguousSources);
+    }
 
     private static Options ParseArguments(string[] args)
     {
