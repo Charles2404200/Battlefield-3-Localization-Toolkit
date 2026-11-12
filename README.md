@@ -41,7 +41,7 @@ The CSV has three logical columns:
 
 The importer normalizes Vietnamese text to Unicode NFC. It accepts commas accidentally left unquoted in the third column by joining the extra fields back into that translation; it does not rewrite the CSV. Standard CSV quoting is still recommended for spreadsheet compatibility, especially for commas, quotes, and newlines.
 
-Some English lines have multiple game IDs. If exactly one Vietnamese translation exists for identical original text, the importer applies it to the other IDs too. It leaves duplicates with conflicting translations alone. Rows with no translation and no unambiguous duplicate remain in English; CSV validation reports how many such rows remain.
+Some English lines have multiple game IDs with different uses. Each ID uses only its own CSV translation. Single uppercase letters and digits are always kept in English when importing, even if their CSV row has a translation: a one-letter compass label such as `E` can also appear as a quick time event key. The importer reports any skipped IDs. Longer action labels such as `ENTER` can still be translated per ID. Rows with no translation remain in English, and CSV validation reports how many remain.
 
 ## How installation works
 
@@ -100,7 +100,7 @@ For CLI text import options, run `dotnet run --project Bf3TextDump -- --help`. T
 | Symptom | Check |
 | --- | --- |
 | CSV validation reports changed English sources | Restore the `english` column to the exported text; edit only `vietnamese`. |
-| A subtitle still appears in English | Check whether its CSV row has a translation. The same English sentence may have several IDs; the importer automatically fills only unambiguous duplicates. |
+| A subtitle still appears in English | Check every ID for that English sentence. Identical source text can have different IDs, and the importer keeps each ID independent. |
 | Font builder reports missing glyphs | Add the reported glyphs to the edited GFX files, then rebuild. Original BF3 GFX files do not contain the complete Vietnamese set. |
 | Text exceeds the signed TOC slot | Shorten some translations. The importer has already tried its supported compression and string layouts. No game file is installed on this failure. |
 | GUI reports an existing `dinput8.dll` | Check the existing mod. The installer will not overwrite an unrelated proxy DLL. |

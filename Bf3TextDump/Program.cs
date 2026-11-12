@@ -45,14 +45,16 @@ public static partial class Program
                 if (checkedSheet.UnquotedTranslationCommaRows != 0)
                     Console.WriteLine($"Recovered commas in the Vietnamese column of " +
                         $"{checkedSheet.UnquotedTranslationCommaRows} rows; CSV file was not changed.");
-                var (resolvedTranslations, inheritedIds, ambiguousSources) =
-                    ExpandDuplicateSourceTranslations(entries, checkedSheet.Translations);
-                Console.WriteLine($"Inherited translations for {inheritedIds} IDs with identical English text; " +
-                    $"left {ambiguousSources} conflicting source groups untouched.");
-                Console.WriteLine($"{entries.Count(entry => entry.RawLength > 0) - resolvedTranslations.Count:N0} " +
+                var effectiveTranslations = ProtectSingleKeyLabels(entries, checkedSheet.Translations,
+                    out var protectedIds);
+                if (protectedIds.Count != 0)
+                    Console.WriteLine($"Kept {protectedIds.Count} single-character key labels in English: " +
+                        string.Join(", ", protectedIds) + ". These IDs may also be used by QTE prompts.");
+                Console.WriteLine($"{entries.Count(entry => entry.RawLength > 0) - effectiveTranslations.Count:N0} " +
                     "nonempty IDs still have no translation and will remain English.");
+                Console.WriteLine("Each ID keeps its own CSV translation; identical English text may have different uses, including key labels.");
                 ImportTranslations(options, referenceInput, chunk, blocks, entries, header,
-                    resolvedTranslations);
+                    effectiveTranslations);
                 return 0;
             }
             if (options.ValidateOnly)
@@ -66,6 +68,10 @@ public static partial class Program
                 if (checkedSheet.UnquotedTranslationCommaRows != 0)
                     Console.WriteLine($"Recovered commas in the Vietnamese column of " +
                         $"{checkedSheet.UnquotedTranslationCommaRows} rows; CSV file was not changed.");
+                ProtectSingleKeyLabels(entries, checkedSheet.Translations, out var protectedIds);
+                if (protectedIds.Count != 0)
+                    Console.WriteLine($"Import will keep {protectedIds.Count} single-character key labels in English: " +
+                        string.Join(", ", protectedIds) + ".");
                 if (checkedSheet.SourceDifferences != 0)
                     throw new InvalidDataException("Translation sheet has changed English sources: " +
                         string.Join(", ", checkedSheet.SourceDifferenceIds.Take(5)));
@@ -121,31 +127,6 @@ public static partial class Program
     }
 
     public static int Run(string[] args) => Main(args);
-
-    private static (IReadOnlyDictionary<uint, string> Translations, int InheritedIds,
-        int AmbiguousSources) ExpandDuplicateSourceTranslations(
-        IReadOnlyList<ChunkEntry> entries, IReadOnlyDictionary<uint, string> explicitTranslations)
-    {
-        var resolved = new Dictionary<uint, string>(explicitTranslations);
-        var inheritedIds = 0;
-        var ambiguousSources = 0;
-        foreach (var sourceGroup in entries.Where(entry => entry.RawLength > 0)
-                     .GroupBy(entry => entry.Source, StringComparer.Ordinal))
-        {
-            var choices = sourceGroup.Where(entry => explicitTranslations.ContainsKey(entry.Hash))
-                .Select(entry => explicitTranslations[entry.Hash])
-                .Distinct(StringComparer.Ordinal).Take(2).ToArray();
-            if (choices.Length > 1)
-            {
-                ambiguousSources++;
-                continue;
-            }
-            if (choices.Length == 0) continue;
-            foreach (var entry in sourceGroup)
-                if (resolved.TryAdd(entry.Hash, choices[0])) inheritedIds++;
-        }
-        return (resolved, inheritedIds, ambiguousSources);
-    }
 
     private static Options ParseArguments(string[] args)
     {
@@ -444,6 +425,28 @@ public static partial class Program
         }
         return new SheetValidation(seen.Count, translated, expected.Count - seen.Count,
             sourceDifferences, unquotedTranslationCommaRows, sourceDifferenceIds, translations);
+    }
+
+    private static Dictionary<uint, string> ProtectSingleKeyLabels(List<ChunkEntry> entries,
+        IReadOnlyDictionary<uint, string> translations, out List<string> protectedIds)
+    {
+        var sourceById = entries.ToDictionary(entry => entry.Hash, entry => entry.Source);
+        var result = new Dictionary<uint, string>(translations);
+        protectedIds = [];
+        foreach (var (id, translation) in translations)
+        {
+            if (!sourceById.TryGetValue(id, out var source) || source.Length != 1)
+                continue;
+            var key = source[0];
+            if ((key is >= 'A' and <= 'Z' or >= '0' and <= '9') &&
+                !string.Equals(source, translation, StringComparison.Ordinal))
+            {
+                result.Remove(id);
+                protectedIds.Add($"0x{id:X8} ({source})");
+            }
+        }
+        protectedIds.Sort(StringComparer.Ordinal);
+        return result;
     }
 
     private static string NormalizeSourceForComparison(string value) => value
