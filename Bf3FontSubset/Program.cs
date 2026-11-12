@@ -8,6 +8,8 @@ namespace Bf3FontSubset;
 
 public static class Program
 {
+private sealed record AsciiGlyph(byte[] Shape, byte[] Advance, byte[] Bounds);
+
 private static void Main(string[] args) => Run(args);
 
 public static void Run(string[] args)
@@ -20,6 +22,7 @@ bool extendedProbe = false;
 bool byteRangeProbe = false;
 bool highPunctuationProbe = false;
 string? vietnameseMapPath = null;
+string? asciiReferenceDirectory = null;
 var output = Path.GetFullPath(Path.Combine("build", "fonts", "subset"));
 for (int i = 0; i < args.Length; i++)
 {
@@ -32,10 +35,13 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--byte-range-probe") byteRangeProbe = true;
     else if (args[i] == "--high-punctuation-probe") highPunctuationProbe = true;
     else if (args[i] == "--vietnamese-map" && i + 1 < args.Length) vietnameseMapPath = Path.GetFullPath(args[++i]);
-    else throw new ArgumentException("Usage: Bf3FontSubset [--source-dir GFX_DIRECTORY] [--output-dir OUTPUT_DIRECTORY] [--minimal | --extended-probe | --byte-range-probe | --high-punctuation-probe | --vietnamese-map MAP_JSON]");
+    else if (args[i] == "--ascii-reference-dir" && i + 1 < args.Length) asciiReferenceDirectory = Path.GetFullPath(args[++i]);
+    else throw new ArgumentException("Usage: Bf3FontSubset [--source-dir GFX_DIRECTORY] [--output-dir OUTPUT_DIRECTORY] [--ascii-reference-dir ORIGINAL_FONT_DUMP] [--minimal | --extended-probe | --byte-range-probe | --high-punctuation-probe | --vietnamese-map MAP_JSON]");
 }
 if (new[] { minimal, extendedProbe, byteRangeProbe, highPunctuationProbe, vietnameseMapPath is not null }.Count(value => value) > 1)
     throw new ArgumentException("Choose one font profile");
+if (asciiReferenceDirectory is not null && vietnameseMapPath is null)
+    throw new ArgumentException("--ascii-reference-dir requires --vietnamese-map");
 if (extendedProbe || byteRangeProbe || highPunctuationProbe) minimal = true;
 var fullMapRemap = new Dictionary<ushort, ushort>();
 if (vietnameseMapPath is not null)
@@ -58,6 +64,13 @@ if (vietnameseMapPath is not null)
 }
 var manifestPath = manifestArgument ?? Path.GetFullPath(Path.Combine("dump", "fonts", "en", "manifest.json"));
 using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+using var referenceManifest = asciiReferenceDirectory is null ? null :
+    JsonDocument.Parse(File.ReadAllText(Path.Combine(asciiReferenceDirectory, "manifest.json")));
+var referenceHashes = referenceManifest is null ? null :
+    referenceManifest.RootElement.GetProperty("assets").EnumerateArray()
+        .Where(asset => asset.GetProperty("gfx").GetBoolean())
+        .ToDictionary(asset => asset.GetProperty("asset").GetString()!,
+            asset => asset.GetProperty("sha256").GetString()!, StringComparer.OrdinalIgnoreCase);
 var corpus = File.ReadAllText(corpusArgument ?? Path.Combine("translations", "us_loc_en_vi.csv"), Encoding.UTF8);
 var byteRemap = new Dictionary<ushort, ushort>
 {
@@ -115,6 +128,21 @@ foreach (var asset in manifest.RootElement.GetProperty("assets").EnumerateArray(
     var originalSize = asset.GetProperty("decoded_size").GetInt32();
     var packedLimit = asset.GetProperty("packed_size").GetInt32();
     var input = File.ReadAllBytes(source);
+    byte[]? asciiReference = null;
+    if (asciiReferenceDirectory is not null)
+    {
+        var assetName = asset.GetProperty("asset").GetString()!;
+        var relative = assetName.Replace('/', Path.DirectorySeparatorChar) + ".gfx";
+        var referencePath = Path.GetFullPath(Path.Combine(asciiReferenceDirectory, relative));
+        if (!referencePath.StartsWith(asciiReferenceDirectory + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Original font path escapes reference directory");
+        asciiReference = File.ReadAllBytes(referencePath);
+        if (referenceHashes is null || !referenceHashes.TryGetValue(assetName, out var expectedHash) ||
+            !Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(asciiReference))
+                .Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Original font reference differs from the game archive: {referencePath}");
+    }
     if (!minimal)
         foreach (var tag in GfxInspector.Analyze(input).Tags.Where(tag => tag.Code == 75))
         {
@@ -161,7 +189,8 @@ foreach (var asset in manifest.RootElement.GetProperty("assets").EnumerateArray(
             : profile == "high-punctuation-probe-metadata" ? punctuationProbeRemap
             : profile == "byte-range-probe-metadata" ? rangeProbeRemap
             : profile is "byte-remap-metadata" or "extended-probe-metadata" ? byteRemap : null;
-        var subset = SubsetGfx(input, keep, remap, out var fontCounts);
+        var subset = SubsetGfx(input, keep, remap,
+            profile == "vietnamese-metadata" ? asciiReference : null, out var fontCounts);
         if (profile == "vietnamese-metadata")
             foreach (var tag in GfxInspector.Analyze(subset).Tags.Where(tag => tag.Code == 75))
             {
@@ -231,9 +260,14 @@ static HashSet<ushort> FontCodes(byte[] data, GfxTag tag)
     return result;
 }
 
-static byte[] SubsetGfx(byte[] data, HashSet<ushort> keep, Dictionary<ushort, ushort>? remap, out List<int> counts)
+static byte[] SubsetGfx(byte[] data, HashSet<ushort> keep, Dictionary<ushort, ushort>? remap,
+    byte[]? asciiReference, out List<int> counts)
 {
     var structure = GfxInspector.Analyze(data);
+    var referenceFonts = asciiReference is null ? null : GfxInspector.Analyze(asciiReference).Tags
+        .Where(tag => tag.Code == 75)
+        .ToDictionary(tag => BinaryPrimitives.ReadUInt16LittleEndian(
+            asciiReference.AsSpan(tag.PayloadOffset, 2)), tag => tag);
     int firstHeader = structure.Tags[0].PayloadOffset;
     // The first custom tag uses a short header in these files.
     firstHeader -= 2;
@@ -248,7 +282,16 @@ static byte[] SubsetGfx(byte[] data, HashSet<ushort> keep, Dictionary<ushort, us
         byte[] payload;
         if (tag.Code == 75 && GfxInspector.AnalyzeFont(data, tag).GlyphCount > 100)
         {
-            payload = SubsetFont(data.AsSpan(tag.PayloadOffset, tag.Length), keep, remap, out var count);
+            byte[]? referenceFont = null;
+            if (referenceFonts is not null)
+            {
+                var fontId = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(tag.PayloadOffset, 2));
+                if (!referenceFonts.TryGetValue(fontId, out var referenceTag))
+                    throw new InvalidDataException($"Original font {fontId} is missing");
+                referenceFont = asciiReference!.AsSpan(referenceTag.PayloadOffset, referenceTag.Length).ToArray();
+            }
+            payload = SubsetFont(data.AsSpan(tag.PayloadOffset, tag.Length), keep, remap,
+                referenceFont, out var count);
             counts.Add(count);
             WriteTagHeader(output, tag.Code, payload.Length);
             output.Write(payload);
@@ -265,7 +308,8 @@ static byte[] SubsetGfx(byte[] data, HashSet<ushort> keep, Dictionary<ushort, us
     return result;
 }
 
-static byte[] SubsetFont(ReadOnlySpan<byte> span, HashSet<ushort> keep, Dictionary<ushort, ushort>? remap, out int selectedCount)
+static byte[] SubsetFont(ReadOnlySpan<byte> span, HashSet<ushort> keep, Dictionary<ushort, ushort>? remap,
+    byte[]? asciiReference, out int selectedCount)
 {
     int countAt = 5 + span[4];
     int count = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(countAt, 2));
@@ -315,33 +359,41 @@ static byte[] SubsetFont(ReadOnlySpan<byte> span, HashSet<ushort> keep, Dictiona
     selectedCount = selected.Count;
     if (selectedCount == 0) throw new InvalidDataException("Subset removed every glyph");
 
-    using var output = new MemoryStream();
-    output.Write(span.Slice(0, countAt));
-    WriteU16(output, checked((ushort)selectedCount));
-    uint shapeOffset = checked((uint)(selectedCount * 4 + 4));
+    var referenceGlyphs = asciiReference is null ? null : ReadAsciiGlyphs(asciiReference);
+    var shapes = new List<byte[]>(selectedCount);
+    var references = new List<AsciiGlyph?>(selectedCount);
     foreach (var index in selected)
     {
-        WriteU32(output, shapeOffset);
         int start = offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(offsetsAt + index * 4, 4)));
         int end = index + 1 < count
             ? offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(offsetsAt + (index + 1) * 4, 4)))
             : codeTableAt;
         if (end < start || end > codeTableAt) throw new InvalidDataException("Glyph shape span invalid");
-        shapeOffset = checked(shapeOffset + (uint)(end - start));
+        AsciiGlyph? reference = null;
+        if (referenceGlyphs is not null && codes[index] is >= 0x21 and <= 0x7E &&
+            !referenceGlyphs.TryGetValue(codes[index], out reference))
+            throw new InvalidDataException($"Original ASCII glyph U+{codes[index]:X4} is missing");
+        references.Add(reference);
+        shapes.Add(reference?.Shape ?? span.Slice(start, end - start).ToArray());
+    }
+
+    using var output = new MemoryStream();
+    output.Write(span.Slice(0, countAt));
+    WriteU16(output, checked((ushort)selectedCount));
+    uint shapeOffset = checked((uint)(selectedCount * 4 + 4));
+    foreach (var shape in shapes)
+    {
+        WriteU32(output, shapeOffset);
+        shapeOffset = checked(shapeOffset + (uint)shape.Length);
     }
     WriteU32(output, shapeOffset);
-    foreach (var index in selected)
-    {
-        int start = offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(offsetsAt + index * 4, 4)));
-        int end = index + 1 < count
-            ? offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(offsetsAt + (index + 1) * 4, 4)))
-            : codeTableAt;
-        output.Write(span.Slice(start, end - start));
-    }
+    foreach (var shape in shapes) output.Write(shape);
     foreach (var index in selected) WriteU16(output, Mapped(codes[index], remap));
     output.Write(span.Slice(layoutAt, 6));
-    foreach (var index in selected) output.Write(span.Slice(layoutAt + 6 + index * 2, 2));
-    foreach (var index in selected) output.Write(span.Slice(boundsStart[index], boundsLength[index]));
+    for (int i = 0; i < selected.Count; i++)
+        output.Write(references[i]?.Advance ?? span.Slice(layoutAt + 6 + selected[i] * 2, 2).ToArray());
+    for (int i = 0; i < selected.Count; i++)
+        output.Write(references[i]?.Bounds ?? span.Slice(boundsStart[selected[i]], boundsLength[selected[i]]).ToArray());
     if (remap is null) output.Write(span.Slice(kerningAt));
     else
     {
@@ -356,6 +408,46 @@ static byte[] SubsetFont(ReadOnlySpan<byte> span, HashSet<ushort> keep, Dictiona
         output.Write(kerning);
     }
     return output.ToArray();
+}
+
+static Dictionary<ushort, AsciiGlyph> ReadAsciiGlyphs(ReadOnlySpan<byte> font)
+{
+    int countAt = 5 + font[4];
+    int count = BinaryPrimitives.ReadUInt16LittleEndian(font.Slice(countAt, 2));
+    int offsetsAt = countAt + 2;
+    int codeTableAt = offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(
+        font.Slice(offsetsAt + count * 4, 4)));
+    int layoutAt = codeTableAt + count * 2;
+    if ((font[2] & 0x80) == 0 || layoutAt + 6 + count * 2 > font.Length)
+        throw new InvalidDataException("Original font ASCII layout is invalid");
+    int boundsAt = layoutAt + 6 + count * 2;
+    var result = new Dictionary<ushort, AsciiGlyph>();
+    for (int index = 0; index < count; index++)
+    {
+        int bits = font[boundsAt] >> 3;
+        int boundsLength = (5 + bits * 4 + 7) / 8;
+        if (boundsAt + boundsLength > font.Length)
+            throw new InvalidDataException("Original ASCII glyph bounds are truncated");
+        ushort code = BinaryPrimitives.ReadUInt16LittleEndian(font.Slice(codeTableAt + index * 2, 2));
+        if (code is >= 0x21 and <= 0x7E)
+        {
+            int shapeStart = offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(
+                font.Slice(offsetsAt + index * 4, 4)));
+            int shapeEnd = index + 1 < count
+                ? offsetsAt + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(
+                    font.Slice(offsetsAt + (index + 1) * 4, 4)))
+                : codeTableAt;
+            if (shapeEnd < shapeStart || shapeEnd > codeTableAt)
+                throw new InvalidDataException("Original ASCII glyph shape is invalid");
+            if (!result.TryAdd(code, new AsciiGlyph(
+                    font.Slice(shapeStart, shapeEnd - shapeStart).ToArray(),
+                    font.Slice(layoutAt + 6 + index * 2, 2).ToArray(),
+                    font.Slice(boundsAt, boundsLength).ToArray())))
+                throw new InvalidDataException($"Original font repeats ASCII glyph U+{code:X4}");
+        }
+        boundsAt += boundsLength;
+    }
+    return result;
 }
 
 static ushort Mapped(ushort code, Dictionary<ushort, ushort>? remap) =>

@@ -264,9 +264,13 @@ internal sealed class MainForm : Form
                 var exportResult = Bf3FontDump.Program.Run([game, "-o", Path.GetDirectoryName(fontManifest)!]);
                 if (exportResult != 0) throw new InvalidDataException("Không xuất được font nguồn. Xem nhật ký.");
             }
+            var originalFonts = Path.Combine(project, "build", "fonts", "original_reference");
+            var referenceResult = Bf3FontDump.Program.Run([game, "-o", originalFonts]);
+            if (referenceResult != 0) throw new InvalidDataException("Không xuất được font gốc để giữ nguyên các nút bấm.");
             var fontStage = Path.Combine(project, "build", "fonts", "gui_stage");
             Bf3FontSubset.Program.Run(["--manifest", fontManifest, "--corpus", sheet,
                 "--vietnamese-map", Path.Combine(stage, "vietnamese_map.json"),
+                "--ascii-reference-dir", originalFonts,
                 "--output-dir", fontStage]);
             var hook = FindHookDll(project);
             var backups = Path.Combine(project, "build", "Loc", "gui_install_backups");

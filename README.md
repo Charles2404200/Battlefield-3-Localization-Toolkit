@@ -49,7 +49,7 @@ BF3 stores English localization in `Update/Patch/Data/Win32/Loc/en.sb`. The impo
 
 The localization text must fit the original **263,138-byte compressed TOC slot** and retain the original **599,272-byte decoded asset size**. The importer keeps the original 65,536-byte decoded block boundaries and combines complete zlib streams from .NET and bundled Zopfli to fill the compressed slot exactly. It does not count trailing padding as compressed data. When translated strings would grow beyond the decoded asset size, identical strings share a single stored copy while every ID keeps its own table record. The importer verifies every rebuilt ID and string. If either size limit cannot be met, installation stops without changing game files.
 
-The C++ x86 hook forwards DirectInput 8 exports to the system DLL. It intercepts matching `ReadFile` calls for three known CAS locations and replaces the returned bytes in memory with payloads from `Battlefield 3/fonts/`. The payloads must remain exactly **62,403**, **28,727**, and **28,845** bytes for the main UI, EULA, and store fonts respectively. The hook caches archive identity by handle, validates the target buffer, and handles completed overlapped reads. It loads font files when the game starts; restart BF3 after changing a payload. The current hook does **not** write a runtime log; an old `fonts/hook_native.log` may remain from previous builds.
+The font builder takes Vietnamese glyphs from the edited GFX files and printable ASCII glyphs from a separate, hash-checked dump of the original game fonts. This preserves keyboard and quick time event labels while retaining Vietnamese text. The GUI creates the original reference dump in `build/fonts/original_reference/` during installation. The C++ x86 hook forwards DirectInput 8 exports to the system DLL. It intercepts matching `ReadFile` calls for three known CAS locations and replaces the returned bytes in memory with payloads from `Battlefield 3/fonts/`. The payloads must remain exactly **62,403**, **28,727**, and **28,845** bytes for the main UI, EULA, and store fonts respectively. The hook caches archive identity by handle, validates the target buffer, and handles completed overlapped reads. It loads font files when the game starts; restart BF3 after changing a payload. The current hook does **not** write a runtime log; an old `fonts/hook_native.log` may remain from previous builds.
 
 The GUI installs only:
 
@@ -89,7 +89,8 @@ The command-line tools can also be run directly:
 ```powershell
 dotnet run --project Bf3TextDump -c Release -- --validate
 dotnet run --project Bf3FontDump -c Release -- -o dump/fonts/en
-dotnet run --project Bf3FontSubset -c Release -- --manifest dump/fonts/en/manifest.json --corpus translations/us_loc_en_vi.csv --vietnamese-map build/Loc/gui_stage/vietnamese_map.json --output-dir build/fonts/manual-stage
+dotnet run --project Bf3FontDump -c Release -- "C:\Program Files (x86)\Steam\steamapps\common\Battlefield 3" -o build/fonts/original_reference
+dotnet run --project Bf3FontSubset -c Release -- --manifest dump/fonts/en/manifest.json --corpus translations/us_loc_en_vi.csv --vietnamese-map build/Loc/gui_stage/vietnamese_map.json --ascii-reference-dir build/fonts/original_reference --output-dir build/fonts/manual-stage
 ```
 
 For CLI text import options, run `dotnet run --project Bf3TextDump -- --help`. The GUI is the supported way to coordinate text, font, backups, and installation.
